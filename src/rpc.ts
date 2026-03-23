@@ -29,29 +29,38 @@ export class DivineRpc {
    * Make an RPC call to the API
    */
   private async call<T>(method: string, params: unknown[] = []): Promise<T> {
-    const response = await this.fetch(this.nostrApi, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.accessToken}`,
-      },
-      body: JSON.stringify({ method, params }),
-      signal: AbortSignal.timeout(30_000),
-    });
+    for (let attempt = 0; ; attempt++) {
+      const response = await this.fetch(this.nostrApi, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.accessToken}`,
+        },
+        body: JSON.stringify({ method, params }),
+        signal: AbortSignal.timeout(30_000),
+      });
 
-    if (!response.ok) throw new RpcError(response.status);
+      if (response.status === 429 && attempt < 3) {
+        const retryAfter = response.headers?.get?.('Retry-After');
+        const delay = retryAfter ? Number(retryAfter) * 1000 : 1000 * 2 ** attempt;
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
 
-    const data: RpcResponse<T> = await response.json();
+      if (!response.ok) throw new RpcError(response.status);
 
-    if (data.error) {
-      throw new Error(data.error);
+      const data: RpcResponse<T> = await response.json();
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      if (data.result === undefined) {
+        throw new Error('No result in RPC response');
+      }
+
+      return data.result;
     }
-
-    if (data.result === undefined) {
-      throw new Error('No result in RPC response');
-    }
-
-    return data.result;
   }
 
   /**

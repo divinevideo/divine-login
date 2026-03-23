@@ -190,6 +190,88 @@ describe('DivineRpc', () => {
     });
   });
 
+  describe('429 retry', () => {
+    it('should retry on 429 and succeed', async () => {
+      vi.useFakeTimers();
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 429,
+          headers: { get: () => null },
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ result: 'abc123' }),
+        });
+
+      const rpc = new DivineRpc({ ...config, fetch: mockFetch as any });
+      const promise = rpc.getPublicKey();
+
+      await vi.advanceTimersByTimeAsync(1000);
+      const result = await promise;
+
+      expect(result).toBe('abc123');
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      vi.useRealTimers();
+    });
+
+    it('should respect Retry-After header', async () => {
+      vi.useFakeTimers();
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 429,
+          headers: { get: (h: string) => h === 'Retry-After' ? '5' : null },
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ result: 'abc123' }),
+        });
+
+      const rpc = new DivineRpc({ ...config, fetch: mockFetch as any });
+      const promise = rpc.getPublicKey();
+
+      // Should not resolve after 4s (Retry-After is 5s)
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await promise;
+      expect(result).toBe('abc123');
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      vi.useRealTimers();
+    });
+
+    it('should throw RpcError(429) after 4 attempts', async () => {
+      vi.useFakeTimers();
+      try {
+        const mockFetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 429,
+          headers: { get: () => null },
+        });
+
+        const rpc = new DivineRpc({ ...config, fetch: mockFetch as any });
+        let caught: unknown;
+        const promise = rpc.getPublicKey().catch((e) => { caught = e; });
+
+        // Advance through 3 retry delays: 1s, 2s, 4s
+        await vi.advanceTimersByTimeAsync(1000);
+        await vi.advanceTimersByTimeAsync(2000);
+        await vi.advanceTimersByTimeAsync(4000);
+        await promise;
+
+        expect(caught).toBeInstanceOf(RpcError);
+        expect((caught as RpcError).status).toBe(429);
+
+        // 4 total: 1 initial + 3 retries
+        expect(mockFetch).toHaveBeenCalledTimes(4);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe('fromServerUrl', () => {
     it('should create client from server URL and access token', () => {
       const rpc = DivineRpc.fromServerUrl('https://login.divine.video', 'token');
