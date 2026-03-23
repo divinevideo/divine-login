@@ -1,6 +1,7 @@
 // ABOUTME: RPC client for Divine Nostr API
 // ABOUTME: Low-latency alternative to NIP-46 relay-based signing
 
+import { RpcError } from './types';
 import type { RpcResponse, SignedEvent, UnsignedEvent } from './types';
 
 /**
@@ -35,7 +36,10 @@ export class DivineRpc {
         'Authorization': `Bearer ${this.accessToken}`,
       },
       body: JSON.stringify({ method, params }),
+      signal: AbortSignal.timeout(30_000),
     });
+
+    if (!response.ok) throw new RpcError(response.status);
 
     const data: RpcResponse<T> = await response.json();
 

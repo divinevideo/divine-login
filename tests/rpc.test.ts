@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DivineRpc } from '../src/rpc';
+import { RpcError } from '../src/types';
 
 describe('DivineRpc', () => {
   const config = {
@@ -10,6 +11,7 @@ describe('DivineRpc', () => {
   describe('getPublicKey', () => {
     it('should return public key', async () => {
       const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
         json: () =>
           Promise.resolve({
             result: 'abc123def456',
@@ -34,6 +36,7 @@ describe('DivineRpc', () => {
 
     it('should throw on error', async () => {
       const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
         json: () =>
           Promise.resolve({
             error: 'Unauthorized',
@@ -59,6 +62,7 @@ describe('DivineRpc', () => {
       };
 
       const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
         json: () => Promise.resolve({ result: signedEvent }),
       });
 
@@ -80,6 +84,7 @@ describe('DivineRpc', () => {
   describe('nip44Encrypt', () => {
     it('should encrypt plaintext', async () => {
       const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
         json: () => Promise.resolve({ result: 'encrypted_data' }),
       });
 
@@ -102,6 +107,7 @@ describe('DivineRpc', () => {
   describe('nip44Decrypt', () => {
     it('should decrypt ciphertext', async () => {
       const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
         json: () => Promise.resolve({ result: 'decrypted message' }),
       });
 
@@ -115,6 +121,7 @@ describe('DivineRpc', () => {
   describe('nip04Encrypt', () => {
     it('should encrypt plaintext with NIP-04', async () => {
       const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
         json: () => Promise.resolve({ result: 'nip04_encrypted' }),
       });
 
@@ -128,6 +135,7 @@ describe('DivineRpc', () => {
   describe('nip04Decrypt', () => {
     it('should decrypt ciphertext with NIP-04', async () => {
       const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
         json: () => Promise.resolve({ result: 'nip04_decrypted' }),
       });
 
@@ -135,6 +143,50 @@ describe('DivineRpc', () => {
       const plaintext = await rpc.nip04Decrypt('sender_pubkey', 'encrypted');
 
       expect(plaintext).toBe('nip04_decrypted');
+    });
+  });
+
+  describe('AbortSignal and RpcError', () => {
+    it('should pass AbortSignal.timeout to fetch', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ result: 'abc123' }),
+      });
+
+      const rpc = new DivineRpc({ ...config, fetch: mockFetch as any });
+      await rpc.getPublicKey();
+
+      const fetchOptions = mockFetch.mock.calls[0][1];
+      expect(fetchOptions.signal).toBeInstanceOf(AbortSignal);
+    });
+
+    it('should throw RpcError on HTTP 500', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+      });
+
+      const rpc = new DivineRpc({ ...config, fetch: mockFetch as any });
+
+      await expect(rpc.getPublicKey()).rejects.toThrow(RpcError);
+      await expect(rpc.getPublicKey()).rejects.toThrow('RPC failed: HTTP 500');
+    });
+
+    it('should throw RpcError on HTTP 401 with correct status', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+      });
+
+      const rpc = new DivineRpc({ ...config, fetch: mockFetch as any });
+
+      try {
+        await rpc.getPublicKey();
+        expect.unreachable('should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(RpcError);
+        expect((e as RpcError).status).toBe(401);
+      }
     });
   });
 

@@ -2,6 +2,18 @@
 // ABOUTME: Includes OAuth response types and RPC request/response formats
 
 /**
+ * Error thrown when an RPC HTTP request fails with a non-OK status
+ */
+export class RpcError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super(`RPC failed: HTTP ${status}`);
+    this.name = 'RpcError';
+    this.status = status;
+  }
+}
+
+/**
  * Storage interface for persisting credentials
  * Compatible with localStorage, sessionStorage, or custom implementations
  */
