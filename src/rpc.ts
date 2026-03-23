@@ -68,7 +68,9 @@ export class DivineRpc {
         continue;
       }
 
-      if ((response.status === 401 || response.status === 403) && attempt === 0) {
+      // Only refresh on 401 (expired token). 403 means policy denied —
+      // refreshing won't help, the new token will get the same 403.
+      if (response.status === 401 && attempt === 0) {
         if (await this.tryRefresh()) continue;
         throw new RpcError(response.status);
       }
