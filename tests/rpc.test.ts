@@ -287,6 +287,83 @@ describe('DivineRpc', () => {
     });
   });
 
+  describe('onUnauthorized', () => {
+    it('should call onUnauthorized on 401 and retry with new token', async () => {
+      const onUnauthorized = vi.fn().mockResolvedValue('new_token');
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce({ ok: false, status: 401 })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ result: 'abc123' }),
+        });
+
+      const rpc = new DivineRpc({ ...config, fetch: mockFetch as any, onUnauthorized });
+      const pubkey = await rpc.getPublicKey();
+
+      expect(pubkey).toBe('abc123');
+      expect(onUnauthorized).toHaveBeenCalledTimes(1);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      // Verify second call uses new token
+      const secondCallHeaders = mockFetch.mock.calls[1][1].headers;
+      expect(secondCallHeaders.Authorization).toBe('Bearer new_token');
+    });
+
+    it('should throw RpcError(401) without onUnauthorized', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 401 });
+
+      const rpc = new DivineRpc({ ...config, fetch: mockFetch as any });
+
+      try {
+        await rpc.getPublicKey();
+        expect.unreachable('should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(RpcError);
+        expect((e as RpcError).status).toBe(401);
+      }
+    });
+
+    it('should coalesce concurrent refresh calls', async () => {
+      let resolveRefresh: (token: string) => void;
+      const onUnauthorized = vi.fn().mockReturnValue(
+        new Promise<string>((r) => { resolveRefresh = r; })
+      );
+
+      let fetchCall = 0;
+      const mockFetch = vi.fn().mockImplementation((_url: string, opts: any) => {
+        fetchCall++;
+        if (fetchCall <= 2) {
+          // First two calls both get 401
+          return Promise.resolve({ ok: false, status: 401 });
+        }
+        // After refresh, both retry and succeed
+        const body = JSON.parse(opts.body);
+        const result = body.method === 'get_public_key' ? 'pubkey123' : 'encrypted';
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ result }),
+        });
+      });
+
+      const rpc = new DivineRpc({ ...config, fetch: mockFetch as any, onUnauthorized });
+
+      // Fire both concurrently
+      const p1 = rpc.getPublicKey();
+      const p2 = rpc.nip44Encrypt('recipient', 'hello');
+
+      // Let the 401s arrive and both trigger refresh
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Resolve the single refresh
+      resolveRefresh!('refreshed_token');
+
+      const [pubkey, ciphertext] = await Promise.all([p1, p2]);
+      expect(pubkey).toBe('pubkey123');
+      expect(ciphertext).toBe('encrypted');
+      // Only 1 refresh call despite 2 concurrent 401s
+      expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('fromServerUrl', () => {
     it('should create client from server URL and access token', () => {
       const rpc = DivineRpc.fromServerUrl('https://login.divine.video', 'token');

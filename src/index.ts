@@ -7,6 +7,7 @@ import type { DivineClientConfig, TokenResponse } from './types';
 
 export { DivineOAuth } from './oauth';
 export { DivineRpc } from './rpc';
+export { RpcError } from './types';
 export { generatePkce, validatePkce } from './pkce';
 
 // Backward-compatible aliases

@@ -15,15 +15,35 @@ export class DivineRpc {
   private accessToken: string;
   private fetch: typeof globalThis.fetch;
   private cachedPubkey: string | null = null;
+  private onUnauthorized?: () => Promise<string>;
+  private refreshPromise: Promise<string> | null = null;
 
   constructor(options: {
     nostrApi: string;
     accessToken: string;
     fetch?: typeof fetch;
+    onUnauthorized?: () => Promise<string>;
   }) {
     this.nostrApi = options.nostrApi;
     this.accessToken = options.accessToken;
     this.fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.onUnauthorized = options.onUnauthorized;
+  }
+
+  private async tryRefresh(): Promise<boolean> {
+    if (!this.onUnauthorized) return false;
+    if (!this.refreshPromise) {
+      this.refreshPromise = this.onUnauthorized();
+    }
+    try {
+      this.accessToken = await this.refreshPromise;
+      this.cachedPubkey = null;
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.refreshPromise = null;
+    }
   }
 
   /**
@@ -46,6 +66,11 @@ export class DivineRpc {
         const delay = retryAfter ? Number(retryAfter) * 1000 : 1000 * 2 ** attempt;
         await new Promise((r) => setTimeout(r, delay));
         continue;
+      }
+
+      if ((response.status === 401 || response.status === 403) && attempt === 0) {
+        if (await this.tryRefresh()) continue;
+        throw new RpcError(response.status);
       }
 
       if (!response.ok) throw new RpcError(response.status);
