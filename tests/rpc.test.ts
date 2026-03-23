@@ -82,17 +82,41 @@ describe('DivineRpc', () => {
       });
 
       const rpc = new DivineRpc({ ...config, fetch: mockFetch as any });
-      const result = await rpc.signEvent({
+      const inputEvent = {
         kind: 1,
         content: 'Hello!',
-        tags: [],
+        tags: [] as string[][],
         created_at: 1234567890,
         pubkey: 'abc123',
-      });
+      };
+      const result = await rpc.signEvent(inputEvent);
 
       expect(result).toEqual(signedEvent);
       expect(result.id).toBe('event123');
       expect(result.sig).toBe('sig123');
+    });
+
+    it('should JSON.stringify event in params for NIP-46 compliance', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ result: { id: 'x', sig: 's', kind: 1, content: '', tags: [], created_at: 0, pubkey: 'p' } }),
+      });
+
+      const inputEvent = {
+        kind: 1,
+        content: 'Hello!',
+        tags: [] as string[][],
+        created_at: 1234567890,
+        pubkey: 'abc123',
+      };
+
+      const rpc = new DivineRpc({ ...config, fetch: mockFetch as any });
+      await rpc.signEvent(inputEvent);
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      // params[0] must be a string, not an object
+      expect(typeof body.params[0]).toBe('string');
+      expect(JSON.parse(body.params[0])).toEqual(inputEvent);
     });
   });
 

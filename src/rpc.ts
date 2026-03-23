@@ -110,7 +110,7 @@ export class DivineRpc {
    * @returns Signed event with id and sig
    */
   async signEvent(event: UnsignedEvent): Promise<SignedEvent> {
-    return this.call<SignedEvent>('sign_event', [event]);
+    return this.call<SignedEvent>('sign_event', [JSON.stringify(event)]);
   }
 
   /**
