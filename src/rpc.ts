@@ -14,6 +14,7 @@ export class DivineRpc {
   private nostrApi: string;
   private accessToken: string;
   private fetch: typeof globalThis.fetch;
+  private cachedPubkey: string | null = null;
 
   constructor(options: {
     nostrApi: string;
@@ -69,7 +70,10 @@ export class DivineRpc {
    * Mirrors NIP-46 get_public_key method
    */
   async getPublicKey(): Promise<string> {
-    return this.call<string>('get_public_key', []);
+    if (this.cachedPubkey) return this.cachedPubkey;
+    const pubkey = await this.call<string>('get_public_key', []);
+    this.cachedPubkey = pubkey;
+    return pubkey;
   }
 
   /**

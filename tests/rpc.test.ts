@@ -34,6 +34,21 @@ describe('DivineRpc', () => {
       );
     });
 
+    it('should cache pubkey after first call', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ result: 'abc123def456' }),
+      });
+
+      const rpc = new DivineRpc({ ...config, fetch: mockFetch as any });
+      const first = await rpc.getPublicKey();
+      const second = await rpc.getPublicKey();
+
+      expect(first).toBe('abc123def456');
+      expect(second).toBe('abc123def456');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
     it('should throw on error', async () => {
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
