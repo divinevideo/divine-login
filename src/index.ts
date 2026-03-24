@@ -1,33 +1,34 @@
 // ABOUTME: Main entry point for @divinevideo/login
 // ABOUTME: Exports OAuth client, RPC client, and utilities
 
-import { DivineOAuth } from './oauth';
-import { DivineRpc } from './rpc';
-import type { DivineClientConfig, TokenResponse } from './types';
+import { DivineOAuth } from "./oauth";
+import { DivineRpc } from "./rpc";
+import type { DivineClientConfig, TokenResponse } from "./types";
 
-export { DivineOAuth } from './oauth';
-export { DivineRpc } from './rpc';
-export { generatePkce, validatePkce } from './pkce';
+export { DivineOAuth } from "./oauth";
+export { DivineRpc } from "./rpc";
+export { RpcError } from "./types";
+export { generatePkce, validatePkce } from "./pkce";
 
 // Backward-compatible aliases
-export { DivineOAuth as KeycastOAuth } from './oauth';
-export { DivineRpc as KeycastRpc } from './rpc';
+export { DivineOAuth as KeycastOAuth } from "./oauth";
+export { DivineRpc as KeycastRpc } from "./rpc";
 
 export type {
-  DivineClientConfig,
-  DivineStorage,
-  OAuthError,
-  PkceChallenge,
-  RpcRequest,
-  RpcResponse,
-  SignedEvent,
-  StoredCredentials,
-  TokenResponse,
-  UnsignedEvent,
-  // Backward-compatible aliases
-  DivineClientConfig as KeycastClientConfig,
-  DivineStorage as KeycastStorage,
-} from './types';
+	DivineClientConfig,
+	DivineStorage,
+	OAuthError,
+	PkceChallenge,
+	RpcRequest,
+	RpcResponse,
+	SignedEvent,
+	StoredCredentials,
+	TokenResponse,
+	UnsignedEvent,
+	// Backward-compatible aliases
+	DivineClientConfig as KeycastClientConfig,
+	DivineStorage as KeycastStorage,
+} from "./types";
 
 /**
  * Create a Divine login client with both OAuth and RPC capabilities
@@ -58,25 +59,25 @@ export type {
  * ```
  */
 export function createDivineClient(config: DivineClientConfig) {
-  const oauth = new DivineOAuth(config);
-  const nostrApi = `${config.serverUrl}/api/nostr`;
+	const oauth = new DivineOAuth(config);
+	const nostrApi = `${config.serverUrl}/api/nostr`;
 
-  return {
-    oauth,
+	return {
+		oauth,
 
-    /**
-     * Create an RPC client from token response
-     */
-    createRpc(tokens: TokenResponse): DivineRpc | null {
-      if (!tokens.access_token) {
-        return null;
-      }
-      return new DivineRpc({
-        nostrApi,
-        accessToken: tokens.access_token,
-      });
-    },
-  };
+		/**
+		 * Create an RPC client from token response
+		 */
+		createRpc(tokens: TokenResponse): DivineRpc | null {
+			if (!tokens.access_token) {
+				return null;
+			}
+			return new DivineRpc({
+				nostrApi,
+				accessToken: tokens.access_token,
+			});
+		},
+	};
 }
 
 /** @deprecated Use createDivineClient instead */

@@ -1,6 +1,6 @@
 {
   "name": "@divinevideo/login",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "TypeScript/JavaScript OAuth client for Divine authentication and Nostr signing via REST RPC",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
