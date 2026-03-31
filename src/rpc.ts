@@ -108,13 +108,20 @@ export class DivineRpc {
 	/**
 	 * Sign an unsigned Nostr event
 	 *
-	 * Mirrors NIP-46 sign_event method
+	 * Mirrors NIP-46 sign_event method.
+	 * If pubkey is missing from the event, it will be filled from getPublicKey().
 	 *
-	 * @param event - Unsigned event to sign
-	 * @returns Signed event with id and sig
+	 * @param event - Unsigned event to sign (pubkey is optional — will be filled automatically)
+	 * @returns Signed event with id, pubkey, and sig
 	 */
-	async signEvent(event: UnsignedEvent): Promise<SignedEvent> {
-		return this.call<SignedEvent>("sign_event", [JSON.stringify(event)]);
+	async signEvent(
+		event: Omit<UnsignedEvent, "pubkey"> & { pubkey?: string },
+	): Promise<SignedEvent> {
+		const pubkey = event.pubkey || (await this.getPublicKey());
+		const completeEvent: UnsignedEvent = { ...event, pubkey };
+		return this.call<SignedEvent>("sign_event", [
+			JSON.stringify(completeEvent),
+		]);
 	}
 
 	/**
