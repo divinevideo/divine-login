@@ -64,6 +64,23 @@ async function derivePublicKeyFromNsec(nsec: string): Promise<string> {
 }
 
 /**
+ * Thrown by {@link DivineOAuth.refreshSession} when a refresh does not succeed.
+ * `definitive` is true only when the server authoritatively rejected the
+ * refresh token (HTTP 400/401) — the token is dead and the session should be
+ * cleared. It is false for transient failures (network reject, 5xx, unparseable
+ * body) where the token may still be valid and the caller should retry instead
+ * of wiping the session.
+ */
+class RefreshError extends Error {
+	readonly definitive: boolean;
+	constructor(message: string, definitive: boolean) {
+		super(message);
+		this.name = "RefreshError";
+		this.definitive = definitive;
+	}
+}
+
+/**
  * OAuth client for Divine login authorization
  */
 export class DivineOAuth {
@@ -126,10 +143,16 @@ export class DivineOAuth {
 				if (current && current.refreshToken !== credentials.refreshToken) {
 					return current;
 				}
-				// Storage still holds the same refresh token we failed on (or nothing):
-				// the token is genuinely unusable. Clear the session.
-				this.storage.removeItem(STORAGE_KEY_SESSION);
-				return null;
+				// Only a definitive server rejection (HTTP 400/401) proves the refresh
+				// token is dead; clear the session only then, and only while storage
+				// still holds the very token we failed on. Transient failures (network
+				// reject, 5xx, unparseable body) leave it possibly valid, so keep the
+				// session and return the existing credentials for the next call to retry.
+				if (e instanceof RefreshError && e.definitive) {
+					this.storage.removeItem(STORAGE_KEY_SESSION);
+					return null;
+				}
+				return credentials;
 			}
 		}
 
@@ -388,16 +411,24 @@ export class DivineOAuth {
 			},
 		);
 
-		const data = await response.json();
-
+		// Inspect the status before consuming the body, so an HTTP auth rejection
+		// is recognized even when the error body is not valid JSON. HTTP 400/401
+		// means the server rejected the refresh token (invalid_grant): definitive
+		// token death. Any other non-OK status (e.g. 5xx) is transient — the token
+		// may still be valid, so callers must not wipe the session.
 		if (!response.ok) {
-			const error = data as OAuthError;
-			throw new Error(
-				error.error_description ?? error.error ?? "Token refresh failed",
-			);
+			const definitive = response.status === 400 || response.status === 401;
+			let message = `Token refresh failed (HTTP ${response.status})`;
+			try {
+				const error = (await response.json()) as OAuthError;
+				message = error.error_description ?? error.error ?? message;
+			} catch {
+				// Non-JSON error body (e.g. proxy HTML): keep the status-based message.
+			}
+			throw new RefreshError(message, definitive);
 		}
 
-		const tokenResponse = data as TokenResponse;
+		const tokenResponse = (await response.json()) as TokenResponse;
 		const credentials = this.toStoredCredentials(tokenResponse);
 		this.saveSession(credentials);
 

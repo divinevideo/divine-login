@@ -331,6 +331,7 @@ describe('DivineOAuth', () => {
         }
         return Promise.resolve({
           ok: false,
+          status: 400,
           json: () =>
             Promise.resolve({
               error: 'invalid_grant',
@@ -373,6 +374,7 @@ describe('DivineOAuth', () => {
 
       const mockFetch = vi.fn().mockResolvedValue({
         ok: false,
+        status: 400,
         json: () =>
           Promise.resolve({
             error: 'invalid_grant',
@@ -420,6 +422,73 @@ describe('DivineOAuth', () => {
         expect(r?.refreshToken).toBe('R1');
         expect(r?.accessToken).toBe('A1');
       }
+    });
+
+    it('does not wipe the session when refresh fails transiently (network reject)', async () => {
+      const { store, storage } = sharedStorage();
+      store.set('divine_session', JSON.stringify(nearExpirySession));
+
+      // fetch itself rejects (offline, DNS, connection reset): the server never
+      // saw the request, so the refresh token is still valid. Wiping here would
+      // log the user out on a transient blip.
+      const mockFetch = vi.fn().mockRejectedValue(new Error('network down'));
+
+      const oauth = new DivineOAuth({ ...config, fetch: mockFetch as any, storage });
+
+      const result = await oauth.getSessionWithRefresh();
+
+      // Session is preserved and the existing credentials are returned so the
+      // next call can retry.
+      expect(result).not.toBeNull();
+      expect(result?.refreshToken).toBe('R0');
+      expect(store.has('divine_session')).toBe(true);
+      const stored = JSON.parse(store.get('divine_session') as string);
+      expect(stored.refreshToken).toBe('R0');
+      expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it('does not wipe the session on a transient 5xx with a non-JSON body', async () => {
+      const { store, storage } = sharedStorage();
+      store.set('divine_session', JSON.stringify(nearExpirySession));
+
+      // HTTP 503 whose body is not JSON (e.g. a proxy HTML error page). The
+      // status, not the body, decides: 5xx is transient, so json() throwing must
+      // not be mistaken for token death.
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
+      });
+
+      const oauth = new DivineOAuth({ ...config, fetch: mockFetch as any, storage });
+
+      const result = await oauth.getSessionWithRefresh();
+
+      expect(result).not.toBeNull();
+      expect(result?.refreshToken).toBe('R0');
+      expect(store.has('divine_session')).toBe(true);
+      expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it('clears the session on a definitive HTTP 400 even when the error body is not JSON', async () => {
+      const { store, storage } = sharedStorage();
+      store.set('divine_session', JSON.stringify(nearExpirySession));
+
+      // HTTP 400 with a non-JSON body: json() rejects, but the 400 status is the
+      // authoritative token-death signal, so the session must still be cleared.
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
+      });
+
+      const oauth = new DivineOAuth({ ...config, fetch: mockFetch as any, storage });
+
+      const result = await oauth.getSessionWithRefresh();
+
+      expect(result).toBeNull();
+      expect(store.has('divine_session')).toBe(false);
+      expect(warnSpy).toHaveBeenCalled();
     });
   });
 });
