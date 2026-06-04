@@ -121,7 +121,30 @@ export class DivineOAuth {
 		const credentials = this.getSession();
 		if (!credentials) return null;
 
-		// If not near expiry, return as-is
+		// Fast path: nothing due, so skip the cross-tab lock entirely.
+		if (!this.shouldRefresh(credentials)) {
+			return credentials;
+		}
+
+		// A refresh is due. Serialize the read/refresh/save across same-origin
+		// tabs with the Web Locks API so only one tab rotates the single-use
+		// refresh token; the others wait, then re-read and reuse the rotated
+		// session instead of replaying a consumed token.
+		return this.withRefreshLock(() => this.refreshIfNeeded());
+	}
+
+	/**
+	 * Re-evaluate the stored session and refresh it if still required. Runs
+	 * inside the cross-tab lock (see {@link withRefreshLock}), so a sibling tab
+	 * that rotated the token while we waited is observed here as an already-fresh
+	 * session and no second refresh is sent.
+	 */
+	private async refreshIfNeeded(): Promise<StoredCredentials | null> {
+		const credentials = this.getSession();
+		if (!credentials) return null;
+
+		// A sibling tab may have rotated and saved a fresh session while we waited
+		// for the lock; if so, there is nothing left to do.
 		if (!this.shouldRefresh(credentials)) {
 			return credentials;
 		}
@@ -162,6 +185,22 @@ export class DivineOAuth {
 		}
 
 		return credentials;
+	}
+
+	/**
+	 * Run `fn` while holding a cross-tab exclusive lock keyed by the session
+	 * storage key, serializing concurrent refreshes across same-origin tabs.
+	 * Falls back to running inline when the Web Locks API is unavailable
+	 * (non-browser runtimes or older browsers); there the per-instance
+	 * singleflight and the re-read recovery in {@link refreshIfNeeded} still
+	 * handle concurrent rotation.
+	 */
+	private async withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
+		const locks = globalThis.navigator?.locks;
+		if (!locks) {
+			return fn();
+		}
+		return await locks.request(`${STORAGE_KEY_SESSION}:refresh`, fn);
 	}
 
 	/**

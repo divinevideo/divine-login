@@ -277,9 +277,14 @@ describe('DivineOAuth', () => {
     let warnSpy: ReturnType<typeof vi.spyOn>;
     beforeEach(() => {
       warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      // Default to the no-Web-Locks fallback so behavior does not depend on
+      // whether the runtime ships navigator.locks (modern Node and browsers do).
+      // The cross-tab serialization test opts in with its own serializing stub.
+      vi.stubGlobal('navigator', {});
     });
     afterEach(() => {
       warnSpy.mockRestore();
+      vi.unstubAllGlobals();
     });
 
     // Build a Map-backed storage shared between OAuth instances to model two
@@ -296,6 +301,27 @@ describe('DivineOAuth', () => {
           removeItem: (k: string) => {
             store.delete(k);
           },
+        },
+      };
+    }
+
+    // Minimal Web Locks stand-in: exclusive and FIFO per lock name. Each request
+    // for a name runs its callback only after the previous holder's callback
+    // settles — enough to model navigator.locks serializing two tabs.
+    function serializingLockManager() {
+      const chains = new Map<string, Promise<unknown>>();
+      return {
+        request(name: string, callback: (lock: unknown) => unknown) {
+          const prev = chains.get(name) ?? Promise.resolve();
+          const run = prev.then(() => callback({ name }));
+          chains.set(
+            name,
+            run.then(
+              () => {},
+              () => {}
+            )
+          );
+          return run;
         },
       };
     }
@@ -489,6 +515,45 @@ describe('DivineOAuth', () => {
       expect(result).toBeNull();
       expect(store.has('divine_session')).toBe(false);
       expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it('serializes refresh across tabs so the loser reuses the rotated session without a second POST', async () => {
+      const { store, storage } = sharedStorage();
+      store.set('divine_session', JSON.stringify(nearExpirySession));
+
+      // With the Web Locks API present, the two tabs must take turns: the first
+      // rotates the token, the second waits, re-reads, and finds a fresh session
+      // — so it never replays the consumed token.
+      vi.stubGlobal('navigator', { locks: serializingLockManager() });
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            bunker_url: 'bunker://new',
+            access_token: 'A1',
+            token_type: 'Bearer',
+            expires_in: 86400,
+            refresh_token: 'R1',
+          }),
+      });
+
+      const oauthA = new DivineOAuth({ ...config, fetch: mockFetch as any, storage });
+      const oauthB = new DivineOAuth({ ...config, fetch: mockFetch as any, storage });
+
+      const [resA, resB] = await Promise.all([
+        oauthA.getSessionWithRefresh(),
+        oauthB.getSessionWithRefresh(),
+      ]);
+
+      // Only one refresh POST happened: the lock made the loser reuse the
+      // winner's rotated session instead of replaying the single-use token.
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(resA?.refreshToken).toBe('R1');
+      expect(resB?.refreshToken).toBe('R1');
+      expect(store.has('divine_session')).toBe(true);
+      const stored = JSON.parse(store.get('divine_session') as string);
+      expect(stored.refreshToken).toBe('R1');
     });
   });
 });
