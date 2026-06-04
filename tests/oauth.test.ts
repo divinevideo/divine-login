@@ -388,5 +388,38 @@ describe('DivineOAuth', () => {
       expect(store.has('divine_session')).toBe(false);
       expect(warnSpy).toHaveBeenCalled();
     });
+
+    it('collapses concurrent calls in one instance into a single refresh POST', async () => {
+      const { storage } = sharedStorage();
+      storage.setItem('divine_session', JSON.stringify(nearExpirySession));
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            bunker_url: 'bunker://new',
+            access_token: 'A1',
+            token_type: 'Bearer',
+            expires_in: 86400,
+            refresh_token: 'R1',
+          }),
+      });
+
+      const oauth = new DivineOAuth({ ...config, fetch: mockFetch as any, storage });
+
+      const results = await Promise.all([
+        oauth.getSessionWithRefresh(),
+        oauth.getSessionWithRefresh(),
+        oauth.getSessionWithRefresh(),
+      ]);
+
+      // Concurrent callers share a single in-flight rotation POST...
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      // ...and all resolve to the same rotated credentials.
+      for (const r of results) {
+        expect(r?.refreshToken).toBe('R1');
+        expect(r?.accessToken).toBe('A1');
+      }
+    });
   });
 });

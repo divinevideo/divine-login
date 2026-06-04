@@ -71,6 +71,8 @@ export class DivineOAuth {
 	private fetch: typeof globalThis.fetch;
 	private storage: DivineStorage;
 	private pendingPkce: PkceChallenge | null = null;
+	/** Collapses concurrent refreshes within this instance into one POST */
+	private refreshInFlight: Promise<StoredCredentials> | null = null;
 
 	constructor(config: DivineClientConfig) {
 		this.config = config;
@@ -110,7 +112,7 @@ export class DivineOAuth {
 		// Try to refresh if we have a refresh token
 		if (credentials.refreshToken) {
 			try {
-				return await this.refreshSession(credentials.refreshToken);
+				return await this.refreshSessionShared(credentials.refreshToken);
 			} catch (e) {
 				console.warn("Session refresh failed:", e);
 				// A concurrent caller — another instance in this tab, or another tab
@@ -345,6 +347,25 @@ export class DivineOAuth {
 		if (!credentials.expiresAt) return false;
 		const fiveMinutes = 5 * 60 * 1000;
 		return Date.now() >= credentials.expiresAt - fiveMinutes;
+	}
+
+	/**
+	 * Refresh, collapsing concurrent calls within this instance into one POST.
+	 * The refresh token rotates on every success, so replaying it concurrently
+	 * would make all but one POST fail; sharing the in-flight promise avoids that.
+	 * Per-instance only — concurrent instances (other tabs) are handled by the
+	 * re-read recovery in getSessionWithRefresh().
+	 */
+	private refreshSessionShared(
+		refreshToken: string,
+	): Promise<StoredCredentials> {
+		if (this.refreshInFlight) {
+			return this.refreshInFlight;
+		}
+		this.refreshInFlight = this.refreshSession(refreshToken).finally(() => {
+			this.refreshInFlight = null;
+		});
+		return this.refreshInFlight;
 	}
 
 	/**
