@@ -167,15 +167,28 @@ export class DivineOAuth {
 					return current;
 				}
 				// Only a definitive server rejection (HTTP 400/401) proves the refresh
-				// token is dead; clear the session only then, and only while storage
-				// still holds the very token we failed on. Transient failures (network
-				// reject, 5xx, unparseable body) leave it possibly valid, so keep the
+				// token is dead. Transient failures (network reject, 5xx, request
+				// timeout/abort, unparseable body) leave it possibly valid, so keep the
 				// session and return the existing credentials for the next call to retry.
-				if (e instanceof RefreshError && e.definitive) {
-					this.storage.removeItem(STORAGE_KEY_SESSION);
-					return null;
+				// These credentials may already be past expiry — shouldRefresh() fires
+				// both before and after expiry — but returning null here would be a
+				// premature logout on a transient blip, the exact failure this path
+				// exists to prevent, and the session stays in storage for the retry
+				// either way. Callers needing a hard check can use isExpired().
+				if (!(e instanceof RefreshError && e.definitive)) {
+					return credentials;
 				}
-				return credentials;
+				// Definitive death. Re-read once more immediately before deleting: in
+				// the no-Web-Locks fallback a sibling could have rotated and saved in
+				// the narrow window since the check above (modern browsers are
+				// serialized by the lock). Only wipe while storage still holds the very
+				// token we failed on; otherwise hand back the sibling's fresh session.
+				const latest = this.getSession();
+				if (latest && latest.refreshToken !== credentials.refreshToken) {
+					return latest;
+				}
+				this.storage.removeItem(STORAGE_KEY_SESSION);
+				return null;
 			}
 		}
 
@@ -447,6 +460,12 @@ export class DivineOAuth {
 					refresh_token: refreshToken,
 					client_id: this.config.clientId,
 				}),
+				// Bound the request so a hung or slow refresh cannot hold the
+				// cross-tab refresh lock (and this instance's singleflight) open
+				// until the browser's own network timeout. An abort surfaces as a
+				// transient failure (not a RefreshError), so the session is kept.
+				// Mirrors the timeout used in rpc.ts.
+				signal: AbortSignal.timeout(30_000),
 			},
 		);
 

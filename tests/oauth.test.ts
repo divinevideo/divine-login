@@ -555,5 +555,120 @@ describe('DivineOAuth', () => {
       const stored = JSON.parse(store.get('divine_session') as string);
       expect(stored.refreshToken).toBe('R1');
     });
+
+    it('bounds the refresh fetch with an abort signal so a hung refresh cannot hold the lock open', async () => {
+      const { storage } = sharedStorage();
+      storage.setItem('divine_session', JSON.stringify(nearExpirySession));
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            bunker_url: 'bunker://new',
+            access_token: 'A1',
+            token_type: 'Bearer',
+            expires_in: 86400,
+            refresh_token: 'R1',
+          }),
+      });
+
+      const oauth = new DivineOAuth({ ...config, fetch: mockFetch as any, storage });
+      await oauth.getSessionWithRefresh();
+
+      // The refresh POST must carry a timeout AbortSignal so a stuck request
+      // aborts instead of holding the cross-tab refresh lock open indefinitely.
+      const init = mockFetch.mock.calls[0][1];
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+      expect(init.signal.aborted).toBe(false);
+    });
+
+    it('treats a refresh fetch abort (timeout) as transient and keeps the session', async () => {
+      const { store, storage } = sharedStorage();
+      store.set('divine_session', JSON.stringify(nearExpirySession));
+
+      // Simulate AbortSignal.timeout firing: fetch rejects with a TimeoutError.
+      // The request never reached the server, so the token may still be valid —
+      // this is transient and the session must be kept, not wiped.
+      const mockFetch = vi
+        .fn()
+        .mockRejectedValue(
+          new DOMException('The operation timed out.', 'TimeoutError')
+        );
+
+      const oauth = new DivineOAuth({ ...config, fetch: mockFetch as any, storage });
+
+      const result = await oauth.getSessionWithRefresh();
+
+      expect(result).not.toBeNull();
+      expect(result?.refreshToken).toBe('R0');
+      expect(store.has('divine_session')).toBe(true);
+      expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it('re-reads before deleting so a sibling rotation in the delete window is recovered, not wiped', async () => {
+      // No Web Locks here (navigator is stubbed to {} by beforeEach), so this is
+      // the fallback path. Model the narrow cross-tab race where the winner saves
+      // its rotated session AFTER the loser's first post-failure re-read but
+      // BEFORE the loser deletes: the compare-and-delete must observe the rotated
+      // token and recover it instead of wiping the winner's fresh session.
+      const winnerSession = {
+        bunkerUrl: 'bunker://new',
+        accessToken: 'A1',
+        refreshToken: 'R1',
+        expiresAt: Date.now() + 86_400_000,
+      };
+
+      const store = new Map<string, string>();
+      store.set('divine_session', JSON.stringify(nearExpirySession));
+
+      let refreshFailed = false;
+      let swapped = false;
+      const removeItem = vi.fn((k: string) => {
+        store.delete(k);
+      });
+      const storage = {
+        getItem: (k: string) => {
+          const v = store.get(k) ?? null;
+          // The first session read AFTER the refresh has failed is the loser's
+          // first re-read (it still sees the dead token); land the winner's save
+          // immediately after it so the next read sees the rotated session.
+          if (k === 'divine_session' && refreshFailed && !swapped) {
+            swapped = true;
+            store.set('divine_session', JSON.stringify(winnerSession));
+          }
+          return v;
+        },
+        setItem: (k: string, v: string) => {
+          store.set(k, v);
+        },
+        removeItem,
+      };
+
+      const mockFetch = vi.fn().mockImplementation(() => {
+        refreshFailed = true;
+        return Promise.resolve({
+          ok: false,
+          status: 400,
+          json: () =>
+            Promise.resolve({
+              error: 'invalid_grant',
+              error_description: 'refresh token already used',
+            }),
+        });
+      });
+
+      const oauth = new DivineOAuth({ ...config, fetch: mockFetch as any, storage });
+
+      const result = await oauth.getSessionWithRefresh();
+
+      // The loser recovers the winner's rotated session and never deletes it.
+      expect(result?.refreshToken).toBe('R1');
+      expect(result?.accessToken).toBe('A1');
+      expect(removeItem).not.toHaveBeenCalled();
+      expect(store.has('divine_session')).toBe(true);
+      const stored = JSON.parse(store.get('divine_session') as string);
+      expect(stored.refreshToken).toBe('R1');
+      expect(warnSpy).toHaveBeenCalled();
+    });
   });
 });
