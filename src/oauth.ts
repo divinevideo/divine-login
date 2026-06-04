@@ -112,8 +112,20 @@ export class DivineOAuth {
 			try {
 				return await this.refreshSession(credentials.refreshToken);
 			} catch (e) {
-				// Refresh failed - clear session and return null
 				console.warn("Session refresh failed:", e);
+				// A concurrent caller — another instance in this tab, or another tab
+				// sharing localStorage — may have already rotated the refresh token and
+				// saved a fresh session. Keycast rotation is strict single-use: exactly
+				// one concurrent POST wins, the rest get invalid_grant. Re-read storage:
+				// if it now holds a different refresh token than the one we just failed
+				// on, a sibling won the race, so return that session instead of wiping it
+				// (the winner's rotated token stays valid server-side).
+				const current = this.getSession();
+				if (current && current.refreshToken !== credentials.refreshToken) {
+					return current;
+				}
+				// Storage still holds the same refresh token we failed on (or nothing):
+				// the token is genuinely unusable. Clear the session.
 				this.storage.removeItem(STORAGE_KEY_SESSION);
 				return null;
 			}

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DivineOAuth } from '../src/oauth';
 
 describe('DivineOAuth', () => {
@@ -268,6 +268,125 @@ describe('DivineOAuth', () => {
 
       const result = await oauth.getSessionWithRefresh();
       expect(result).toBeNull();
+    });
+  });
+
+  describe('getSessionWithRefresh — concurrent rotation', () => {
+    // The failure path intentionally logs via console.warn; silence it so test
+    // output stays clean, and keep the spy so tests can assert it fired.
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      warnSpy.mockRestore();
+    });
+
+    // Build a Map-backed storage shared between OAuth instances to model two
+    // browser tabs (or two module instances) sharing the same localStorage.
+    function sharedStorage() {
+      const store = new Map<string, string>();
+      return {
+        store,
+        storage: {
+          getItem: (k: string) => store.get(k) ?? null,
+          setItem: (k: string, v: string) => {
+            store.set(k, v);
+          },
+          removeItem: (k: string) => {
+            store.delete(k);
+          },
+        },
+      };
+    }
+
+    const nearExpirySession = {
+      bunkerUrl: 'bunker://old',
+      accessToken: 'A0',
+      refreshToken: 'R0',
+      expiresAt: Date.now() + 60_000, // inside the 5-minute refresh window
+    };
+
+    it('recovers the winner session for the loser instead of wiping it', async () => {
+      const { store, storage } = sharedStorage();
+      store.set('divine_session', JSON.stringify(nearExpirySession));
+
+      // Model keycast's single-use rotation: the first POST wins with a rotated
+      // token, every later replay of R0 gets HTTP 400 invalid_grant.
+      let callCount = 0;
+      const mockFetch = vi.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          return Promise.resolve({
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                bunker_url: 'bunker://new',
+                access_token: 'A1',
+                token_type: 'Bearer',
+                expires_in: 86400,
+                refresh_token: 'R1',
+              }),
+          });
+        }
+        return Promise.resolve({
+          ok: false,
+          json: () =>
+            Promise.resolve({
+              error: 'invalid_grant',
+              error_description: 'refresh token already used',
+            }),
+        });
+      });
+
+      const oauthA = new DivineOAuth({ ...config, fetch: mockFetch as any, storage });
+      const oauthB = new DivineOAuth({ ...config, fetch: mockFetch as any, storage });
+
+      const [resA, resB] = await Promise.all([
+        oauthA.getSessionWithRefresh(),
+        oauthB.getSessionWithRefresh(),
+      ]);
+
+      // Both callers end with the winner's valid rotated credentials.
+      expect(resA).not.toBeNull();
+      expect(resB).not.toBeNull();
+      expect(resA?.refreshToken).toBe('R1');
+      expect(resA?.accessToken).toBe('A1');
+      expect(resB?.refreshToken).toBe('R1');
+      expect(resB?.accessToken).toBe('A1');
+
+      // The stored session is the winner's and was never deleted.
+      expect(store.has('divine_session')).toBe(true);
+      const stored = JSON.parse(store.get('divine_session') as string);
+      expect(stored.refreshToken).toBe('R1');
+      expect(stored.accessToken).toBe('A1');
+
+      // One POST per instance (singleflight is per-instance, added separately).
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      // The loser hit the refresh-failure path before recovering.
+      expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it('still clears the session when the refresh token is genuinely dead', async () => {
+      const { store, storage } = sharedStorage();
+      store.set('divine_session', JSON.stringify(nearExpirySession));
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: false,
+        json: () =>
+          Promise.resolve({
+            error: 'invalid_grant',
+            error_description: 'refresh token expired',
+          }),
+      });
+
+      const oauth = new DivineOAuth({ ...config, fetch: mockFetch as any, storage });
+
+      const result = await oauth.getSessionWithRefresh();
+
+      expect(result).toBeNull();
+      expect(store.has('divine_session')).toBe(false);
+      expect(warnSpy).toHaveBeenCalled();
     });
   });
 });
