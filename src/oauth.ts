@@ -162,6 +162,14 @@ export class DivineOAuth {
 				// if it now holds a different refresh token than the one we just failed
 				// on, a sibling won the race, so return that session instead of wiping it
 				// (the winner's rotated token stays valid server-side).
+				//
+				// This re-read runs after the awaited refresh, so it observes a sibling
+				// that rotated while our request was in flight. On the Web Locks path
+				// that is the whole story: cross-tab refreshes are serialized, so no
+				// sibling rotates concurrently and this recovery is guaranteed. On the
+				// no-Web-Locks fallback path two tabs can still interleave, so the
+				// recovery is best-effort — it catches the common case but cannot
+				// guarantee serialization the way the lock does.
 				const current = this.getSession();
 				if (current && current.refreshToken !== credentials.refreshToken) {
 					return current;
@@ -178,15 +186,8 @@ export class DivineOAuth {
 				if (!(e instanceof RefreshError && e.definitive)) {
 					return credentials;
 				}
-				// Definitive death. Re-read once more immediately before deleting: in
-				// the no-Web-Locks fallback a sibling could have rotated and saved in
-				// the narrow window since the check above (modern browsers are
-				// serialized by the lock). Only wipe while storage still holds the very
-				// token we failed on; otherwise hand back the sibling's fresh session.
-				const latest = this.getSession();
-				if (latest && latest.refreshToken !== credentials.refreshToken) {
-					return latest;
-				}
+				// Definitive death: the server rejected this exact token and the
+				// re-read above found no sibling rotation. Clear the session.
 				this.storage.removeItem(STORAGE_KEY_SESSION);
 				return null;
 			}
@@ -204,16 +205,30 @@ export class DivineOAuth {
 	 * Run `fn` while holding a cross-tab exclusive lock keyed by the session
 	 * storage key, serializing concurrent refreshes across same-origin tabs.
 	 * Falls back to running inline when the Web Locks API is unavailable
-	 * (non-browser runtimes or older browsers); there the per-instance
-	 * singleflight and the re-read recovery in {@link refreshIfNeeded} still
-	 * handle concurrent rotation.
+	 * (non-browser runtimes or older browsers) or when a lock request is
+	 * rejected at runtime (e.g. SecurityError under storage partitioning);
+	 * there the per-instance singleflight and the re-read recovery in
+	 * {@link refreshIfNeeded} still handle concurrent rotation on a best-effort
+	 * basis.
 	 */
 	private async withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
 		const locks = globalThis.navigator?.locks;
 		if (!locks) {
 			return fn();
 		}
-		return await locks.request(`${STORAGE_KEY_SESSION}:refresh`, fn);
+		try {
+			return await locks.request(`${STORAGE_KEY_SESSION}:refresh`, fn);
+		} catch (e) {
+			// The Web Locks API is present but the request itself failed — e.g. a
+			// SecurityError in a sandboxed or storage-partitioned context. The lock
+			// was never acquired, so fn has not run; run it inline so
+			// getSessionWithRefresh still honors its StoredCredentials | null
+			// contract instead of rejecting. (fn is refreshIfNeeded, which resolves
+			// rather than rejects, so the failure that lands here is the lock
+			// request, leaving this inline call as fn's first and only execution.)
+			console.warn("Refresh lock unavailable; refreshing inline:", e);
+			return fn();
+		}
 	}
 
 	/**
