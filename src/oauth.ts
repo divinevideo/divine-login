@@ -163,6 +163,14 @@ export class DivineOAuth {
 				// on, a sibling won the race, so return that session instead of wiping it
 				// (the winner's rotated token stays valid server-side).
 				//
+				// TODO(#8): this recovery depends on keycast having NO refresh-token
+				// reuse detection — replaying the consumed token must not revoke the
+				// winner's rotated token. keycast already has the family-revoke
+				// primitive and cites RFC 9700 (which recommends reuse detection), so
+				// this is a cross-service tripwire: if keycast adopts it, this re-read
+				// returns a server-side-revoked session. Contract, verification, and
+				// fallback: docs/keycast-refresh-contract.md.
+				//
 				// This re-read runs after the awaited refresh, so it observes a sibling
 				// that rotated while our request was in flight. On the Web Locks path
 				// that is the whole story: cross-tab refreshes are serialized, so no
