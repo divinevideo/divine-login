@@ -348,6 +348,10 @@ export class DivineOAuth {
 					redirect_uri: this.config.redirectUri,
 					code_verifier: codeVerifier,
 				}),
+				// Bound the one-time code exchange so a hung request surfaces as a
+				// timeout the UI can handle instead of hanging the login. Mirrors the
+				// timeout on refreshSession and rpc.ts.
+				signal: AbortSignal.timeout(30_000),
 			},
 		);
 

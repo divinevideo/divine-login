@@ -137,6 +137,30 @@ describe('DivineOAuth', () => {
         'Session not found'
       );
     });
+
+    it('bounds the token exchange fetch with an abort signal', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            bunker_url: 'bunker://abc?relay=wss://relay.test&secret=xyz',
+            access_token: 'ucan_token',
+            token_type: 'Bearer',
+            expires_in: 86400,
+            scope: 'sign_event',
+          }),
+      });
+
+      const oauth = new DivineOAuth({ ...config, fetch: mockFetch as any });
+      await oauth.getAuthorizationUrl();
+      await oauth.exchangeCode('test_code');
+
+      // A hung token exchange must abort instead of hanging the login flow,
+      // mirroring the bounded refresh fetch.
+      const init = mockFetch.mock.calls[0][1];
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+      expect(init.signal.aborted).toBe(false);
+    });
   });
 
   describe('toStoredCredentials', () => {
