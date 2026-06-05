@@ -64,6 +64,23 @@ async function derivePublicKeyFromNsec(nsec: string): Promise<string> {
 }
 
 /**
+ * Thrown by {@link DivineOAuth.refreshSession} when a refresh does not succeed.
+ * `definitive` is true only when the server authoritatively rejected the
+ * refresh token (HTTP 400/401) — the token is dead and the session should be
+ * cleared. It is false for transient failures (network reject, 5xx, unparseable
+ * body) where the token may still be valid and the caller should retry instead
+ * of wiping the session.
+ */
+class RefreshError extends Error {
+	readonly definitive: boolean;
+	constructor(message: string, definitive: boolean) {
+		super(message);
+		this.name = "RefreshError";
+		this.definitive = definitive;
+	}
+}
+
+/**
  * OAuth client for Divine login authorization
  */
 export class DivineOAuth {
@@ -71,6 +88,8 @@ export class DivineOAuth {
 	private fetch: typeof globalThis.fetch;
 	private storage: DivineStorage;
 	private pendingPkce: PkceChallenge | null = null;
+	/** Collapses concurrent refreshes within this instance into one POST */
+	private refreshInFlight: Promise<StoredCredentials> | null = null;
 
 	constructor(config: DivineClientConfig) {
 		this.config = config;
@@ -102,7 +121,30 @@ export class DivineOAuth {
 		const credentials = this.getSession();
 		if (!credentials) return null;
 
-		// If not near expiry, return as-is
+		// Fast path: nothing due, so skip the cross-tab lock entirely.
+		if (!this.shouldRefresh(credentials)) {
+			return credentials;
+		}
+
+		// A refresh is due. Serialize the read/refresh/save across same-origin
+		// tabs with the Web Locks API so only one tab rotates the single-use
+		// refresh token; the others wait, then re-read and reuse the rotated
+		// session instead of replaying a consumed token.
+		return this.withRefreshLock(() => this.refreshIfNeeded());
+	}
+
+	/**
+	 * Re-evaluate the stored session and refresh it if still required. Runs
+	 * inside the cross-tab lock (see {@link withRefreshLock}), so a sibling tab
+	 * that rotated the token while we waited is observed here as an already-fresh
+	 * session and no second refresh is sent.
+	 */
+	private async refreshIfNeeded(): Promise<StoredCredentials | null> {
+		const credentials = this.getSession();
+		if (!credentials) return null;
+
+		// A sibling tab may have rotated and saved a fresh session while we waited
+		// for the lock; if so, there is nothing left to do.
 		if (!this.shouldRefresh(credentials)) {
 			return credentials;
 		}
@@ -110,10 +152,42 @@ export class DivineOAuth {
 		// Try to refresh if we have a refresh token
 		if (credentials.refreshToken) {
 			try {
-				return await this.refreshSession(credentials.refreshToken);
+				return await this.refreshSessionShared(credentials.refreshToken);
 			} catch (e) {
-				// Refresh failed - clear session and return null
 				console.warn("Session refresh failed:", e);
+				// A concurrent caller — another instance in this tab, or another tab
+				// sharing localStorage — may have already rotated the refresh token and
+				// saved a fresh session. Keycast rotation is strict single-use: exactly
+				// one concurrent POST wins, the rest get invalid_grant. Re-read storage:
+				// if it now holds a different refresh token than the one we just failed
+				// on, a sibling won the race, so return that session instead of wiping it
+				// (the winner's rotated token stays valid server-side).
+				//
+				// This re-read runs after the awaited refresh, so it observes a sibling
+				// that rotated while our request was in flight. On the Web Locks path
+				// that is the whole story: cross-tab refreshes are serialized, so no
+				// sibling rotates concurrently and this recovery is guaranteed. On the
+				// no-Web-Locks fallback path two tabs can still interleave, so the
+				// recovery is best-effort — it catches the common case but cannot
+				// guarantee serialization the way the lock does.
+				const current = this.getSession();
+				if (current && current.refreshToken !== credentials.refreshToken) {
+					return current;
+				}
+				// Only a definitive server rejection (HTTP 400/401) proves the refresh
+				// token is dead. Transient failures (network reject, 5xx, request
+				// timeout/abort, unparseable body) leave it possibly valid, so keep the
+				// session and return the existing credentials for the next call to retry.
+				// These credentials may already be past expiry — shouldRefresh() fires
+				// both before and after expiry — but returning null here would be a
+				// premature logout on a transient blip, the exact failure this path
+				// exists to prevent, and the session stays in storage for the retry
+				// either way. Callers needing a hard check can use isExpired().
+				if (!(e instanceof RefreshError && e.definitive)) {
+					return credentials;
+				}
+				// Definitive death: the server rejected this exact token and the
+				// re-read above found no sibling rotation. Clear the session.
 				this.storage.removeItem(STORAGE_KEY_SESSION);
 				return null;
 			}
@@ -125,6 +199,36 @@ export class DivineOAuth {
 		}
 
 		return credentials;
+	}
+
+	/**
+	 * Run `fn` while holding a cross-tab exclusive lock keyed by the session
+	 * storage key, serializing concurrent refreshes across same-origin tabs.
+	 * Falls back to running inline when the Web Locks API is unavailable
+	 * (non-browser runtimes or older browsers) or when a lock request is
+	 * rejected at runtime (e.g. SecurityError under storage partitioning);
+	 * there the per-instance singleflight and the re-read recovery in
+	 * {@link refreshIfNeeded} still handle concurrent rotation on a best-effort
+	 * basis.
+	 */
+	private async withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
+		const locks = globalThis.navigator?.locks;
+		if (!locks) {
+			return fn();
+		}
+		try {
+			return await locks.request(`${STORAGE_KEY_SESSION}:refresh`, fn);
+		} catch (e) {
+			// The Web Locks API is present but the request itself failed — e.g. a
+			// SecurityError in a sandboxed or storage-partitioned context. The lock
+			// was never acquired, so fn has not run; run it inline so
+			// getSessionWithRefresh still honors its StoredCredentials | null
+			// contract instead of rejecting. (fn is refreshIfNeeded, which resolves
+			// rather than rejects, so the failure that lands here is the lock
+			// request, leaving this inline call as fn's first and only execution.)
+			console.warn("Refresh lock unavailable; refreshing inline:", e);
+			return fn();
+		}
 	}
 
 	/**
@@ -244,6 +348,10 @@ export class DivineOAuth {
 					redirect_uri: this.config.redirectUri,
 					code_verifier: codeVerifier,
 				}),
+				// Bound the one-time code exchange so a hung request surfaces as a
+				// timeout the UI can handle instead of hanging the login. Mirrors the
+				// timeout on refreshSession and rpc.ts.
+				signal: AbortSignal.timeout(30_000),
 			},
 		);
 
@@ -336,6 +444,25 @@ export class DivineOAuth {
 	}
 
 	/**
+	 * Refresh, collapsing concurrent calls within this instance into one POST.
+	 * The refresh token rotates on every success, so replaying it concurrently
+	 * would make all but one POST fail; sharing the in-flight promise avoids that.
+	 * Per-instance only — concurrent instances (other tabs) are handled by the
+	 * re-read recovery in getSessionWithRefresh().
+	 */
+	private refreshSessionShared(
+		refreshToken: string,
+	): Promise<StoredCredentials> {
+		if (this.refreshInFlight) {
+			return this.refreshInFlight;
+		}
+		this.refreshInFlight = this.refreshSession(refreshToken).finally(() => {
+			this.refreshInFlight = null;
+		});
+		return this.refreshInFlight;
+	}
+
+	/**
 	 * Refresh session using stored refresh token
 	 *
 	 * @param refreshToken - Refresh token from previous session
@@ -352,19 +479,33 @@ export class DivineOAuth {
 					refresh_token: refreshToken,
 					client_id: this.config.clientId,
 				}),
+				// Bound the request so a hung or slow refresh cannot hold the
+				// cross-tab refresh lock (and this instance's singleflight) open
+				// until the browser's own network timeout. An abort surfaces as a
+				// transient failure (not a RefreshError), so the session is kept.
+				// Mirrors the timeout used in rpc.ts.
+				signal: AbortSignal.timeout(30_000),
 			},
 		);
 
-		const data = await response.json();
-
+		// Inspect the status before consuming the body, so an HTTP auth rejection
+		// is recognized even when the error body is not valid JSON. HTTP 400/401
+		// means the server rejected the refresh token (invalid_grant): definitive
+		// token death. Any other non-OK status (e.g. 5xx) is transient — the token
+		// may still be valid, so callers must not wipe the session.
 		if (!response.ok) {
-			const error = data as OAuthError;
-			throw new Error(
-				error.error_description ?? error.error ?? "Token refresh failed",
-			);
+			const definitive = response.status === 400 || response.status === 401;
+			let message = `Token refresh failed (HTTP ${response.status})`;
+			try {
+				const error = (await response.json()) as OAuthError;
+				message = error.error_description ?? error.error ?? message;
+			} catch {
+				// Non-JSON error body (e.g. proxy HTML): keep the status-based message.
+			}
+			throw new RefreshError(message, definitive);
 		}
 
-		const tokenResponse = data as TokenResponse;
+		const tokenResponse = (await response.json()) as TokenResponse;
 		const credentials = this.toStoredCredentials(tokenResponse);
 		this.saveSession(credentials);
 
