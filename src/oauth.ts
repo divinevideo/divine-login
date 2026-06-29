@@ -171,7 +171,7 @@ export class DivineOAuth {
 				// recovery is best-effort — it catches the common case but cannot
 				// guarantee serialization the way the lock does.
 				//
-				// Residual window, tracked and decided in #7: in the no-Web-Locks
+				// Residual window, decided in #7 (closed): in the no-Web-Locks
 				// case two real processes sharing storage can have the winner's
 				// setItem(R1) committed by the OS storage mutex between this
 				// guard-read and the removeItem below, so the loser wipes the
