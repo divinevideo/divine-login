@@ -4,7 +4,7 @@
 
 This document records a behavior of the keycast auth server that `@divinevideo/login`
 silently depends on. Nothing in this repo's test suite will fail if keycast breaks
-the contract, so this doc plus the `TODO(#8)` anchor in `src/oauth.ts` are the
+the contract, so this doc plus the `CONTRACT:` anchor in `src/oauth.ts` are the
 tripwire: a human reviewing a keycast auth change should find this contract before
 shipping.
 
@@ -33,7 +33,8 @@ event refresh-token *reuse detection* keys on.
 ## Why it matters (failure mode if the contract breaks)
 
 If keycast adds reuse detection (treats a consumed-token replay as a compromise
-signal and revokes the whole token family per RFC 9700), then:
+signal and revokes the active token — commonly the whole token family — as
+RFC 9700 §4.14.2 recommends), then:
 
 1. The loser POSTs the consumed token.
 2. keycast revokes every refresh token for that authorization — **including the
@@ -61,12 +62,15 @@ is users getting logged out again, the exact regression PR #6 fixed.
 
 ## Verification — current keycast behaves correctly
 
-Verified against `divinevideo/keycast` @ `c235095` (the assumption holds today):
+Verified against `divinevideo/keycast` @ `c235095` (the assumption holds today).
+The three cited files are byte-identical from `c235095` through current keycast
+`main` HEAD `a4d59f1` (and through `c828851`), so the table below needs no re-diff
+against those revisions:
 
 | Fact | Location |
 | --- | --- |
 | `consume()` is an atomic single-use `UPDATE ... SET consumed_at = NOW() WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > NOW() RETURNING *`; one concurrent caller wins, losers get `None`. | `core/src/repositories/refresh_token.rs` (`consume`) |
-| The refresh-token grant handler returns `invalid_grant` on `None` and **does not** call `revoke_for_authorization`. The winner's new token (created later in the same handler) survives. | `api/src/api/http/oauth.rs` (refresh_token grant) |
+| The refresh-token grant handler returns `invalid_grant` on `None` and **does not** call `revoke_for_authorization`. The winner's new token (created in the winner's own handler invocation) survives. | `api/src/api/http/oauth.rs` (refresh_token grant) |
 | The family-revoke primitive `revoke_for_authorization()` exists but is wired **only** to re-authorization cleanup, not to reuse detection. | `core/src/repositories/refresh_token.rs` (`revoke_for_authorization`); call site in `api/src/api/http/oauth.rs` |
 | No reuse-detection code, `TODO`, or doc item; no open keycast issue for it. keycast's own doc documents one-time-use replay → `invalid_grant` only. | `docs/SILENT_REAUTH_IMPLEMENTATION.md` |
 
@@ -75,10 +79,12 @@ Verified against `divinevideo/keycast` @ `c235095` (the assumption holds today):
 - The family-revoke primitive (`revoke_for_authorization`) already exists — reuse
   detection is roughly one call added to the `consume() == None` branch.
 - keycast explicitly cites **RFC 9700** (OAuth 2.0 Security BCP) for its rotation.
-  RFC 9700 §4.14 *recommends* that on detecting refresh-token reuse the authorization
-  server SHOULD revoke the active refresh token / family. keycast implements the
-  rotation half of that recommendation but not the revoke-on-reuse half — so adopting
-  reuse detection would be a natural, standards-endorsed future change.
+  RFC 9700 §4.14.2 *recommends* that on detecting refresh-token reuse the authorization
+  server SHOULD revoke the active refresh token. (Revoking the whole token family is a
+  common implementation of that guidance, not the RFC's literal text.) keycast
+  implements the rotation half of that recommendation but not the revoke-on-reuse
+  half — so adopting reuse detection would be a natural, standards-endorsed future
+  change.
 
 ## Required follow-ups (human action — cannot be automated from this repo)
 
