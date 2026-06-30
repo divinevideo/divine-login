@@ -180,9 +180,10 @@ export class DivineOAuth {
 				// neither cheap hardening actually closes it — do not add them: a
 				// microtask yield before the re-read only schedules within this
 				// event loop and never pumps a separate OS process, and a
-				// storage-event mutex only spans tabs within one browser (already
-				// covered by Web Locks), not OS processes. Both look safe without
-				// being safe.
+				// storage-event mutex would only add same-browser cross-tab
+				// serialization (what Web Locks already gives us when present)
+				// and still does not cross OS processes, so it leaves this
+				// cross-process window open. Both look safe without being safe.
 				const current = this.getSession();
 				if (current && current.refreshToken !== credentials.refreshToken) {
 					return current;
