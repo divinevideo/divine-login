@@ -43,22 +43,50 @@ RFC 9700 §4.14.2 recommends), then:
    revoked server-side.
 4. The next refresh fails with `invalid_grant` → the user is silently logged out.
 
-So under reuse detection the recovery would hand back a doomed session, and on the
-no-lock fallback path a single concurrent refresh would log out *both* tabs, not just
-defeat the recovery. This is invisible from the divine-login side — the only symptom
-is users getting logged out again, the exact regression PR #6 fixed.
+So under reuse detection the recovery would hand back a doomed session: on the
+no-lock concurrent-rotation path a single concurrent refresh would log out *both* tabs
+(the winner's live token is revoked too), not just defeat the loser's recovery. The
+blast radius is that path specifically — the lock-path transient-retry already logs out
+today, so reuse detection adds nothing new there (see Scope below). This is invisible
+from the divine-login side — the only symptom is users getting logged out again, the
+exact regression PR #6 fixed.
 
-## Scope: which path actually replays a consumed token
+## Scope: replay-occurrence vs. dependence on this contract
 
-- **Web Locks happy path:** cross-tab refreshes are serialized. The second tab
-  acquires the lock, re-reads storage, sees the fresh token (`shouldRefresh` is
-  false) and returns **without POSTing**. No consumed token is replayed, so reuse
-  detection would not even fire here.
+Two questions are easy to conflate; they have different answers.
+
+**(a) Does a caller ever re-POST an already-consumed refresh token?** Yes — on
+*both* paths:
+
+- **Web Locks path, transient-retry:** a single caller POSTs token A; keycast
+  consumes A and mints token B, but the client sees a *transient* failure (network
+  reject, 5xx, timeout/abort, unparseable body — not a definitive 400/401). The catch
+  block re-reads storage, still sees token A (it holds the lock, so no sibling
+  rotated), keeps the session (`src/oauth.ts` `refreshIfNeeded`, transient branch),
+  and the next refresh re-POSTs the now-consumed token A.
 - **No-Web-Locks fallback path** (non-browser runtimes, older browsers, or a rejected
   lock request) and the cross-process window tracked by
   [divine-login#7](https://github.com/divinevideo/divine-login/issues/7): two callers
-  can interleave, both POST, and the loser replays the consumed token. **This is the
-  path that depends on the contract.**
+  interleave, both POST, and the loser replays the consumed token after the winner
+  rotated.
+
+**(b) Does the recovery's correctness depend on this contract (no family-revoke on
+replay)?** Only on the **no-lock concurrent-rotation path** — because it is the only
+path with a *live* sibling token to protect:
+
+- On the **lock-path transient-retry** there is no live sibling token. keycast minted
+  token B but the client never received it, so B is orphaned (held by nobody). That
+  path already ends in `invalid_grant` → logout *today*, regardless of reuse
+  detection — the session is lost the moment the rotation response is dropped. Reuse
+  detection would additionally revoke the orphaned B, but that changes nothing
+  observable. **So reuse detection does not newly break the lock path.**
+- On the **no-lock concurrent-rotation path** the winner holds and is actively using
+  token B. Today the loser's replay returns `invalid_grant`, the loser re-reads
+  storage, finds B, and recovers the winner's live session. Under reuse detection the
+  loser's replay of consumed token A revokes the *family* — including the winner's
+  live token B — so the recovery hands back an already-revoked session and the
+  winner's own next refresh fails too. **This is the path that depends on the
+  contract.**
 
 ## Verification — current keycast behaves correctly
 
