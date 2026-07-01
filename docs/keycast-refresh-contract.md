@@ -91,9 +91,10 @@ path with a *live* sibling token to protect:
 ## Verification — current keycast behaves correctly
 
 Verified against `divinevideo/keycast` @ `c235095` (the assumption holds today).
-The three cited files are byte-identical from `c235095` through current keycast
-`main` HEAD `a4d59f1` (and through `c828851`), so the table below needs no re-diff
-against those revisions:
+As of 2026-07-01 the three cited files remain byte-identical to `c235095` on
+keycast `main` (re-confirmed through HEAD `a549632`). keycast rebases `main`, so
+this note pins the stable `c235095` baseline rather than a moving HEAD; re-diff the
+three files below if a keycast auth change lands.
 
 | Fact | Location |
 | --- | --- |
