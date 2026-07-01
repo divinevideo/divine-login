@@ -170,6 +170,20 @@ export class DivineOAuth {
 				// no-Web-Locks fallback path two tabs can still interleave, so the
 				// recovery is best-effort — it catches the common case but cannot
 				// guarantee serialization the way the lock does.
+				//
+				// Residual window, decided in #7 (closed): in the no-Web-Locks
+				// case two real processes sharing storage can have the winner's
+				// setItem(R1) committed by the OS storage mutex between this
+				// guard-read and the removeItem below, so the loser wipes the
+				// winner's fresh session. Decision: ACCEPT it. localStorage has no
+				// atomic compare-and-swap, so the window cannot be closed here, and
+				// neither cheap hardening actually closes it — do not add them: a
+				// microtask yield before the re-read only schedules within this
+				// event loop and never pumps a separate OS process, and a
+				// storage-event mutex would only add same-browser cross-tab
+				// serialization (what Web Locks already gives us when present)
+				// and still does not cross OS processes, so it leaves this
+				// cross-process window open. Both look safe without being safe.
 				const current = this.getSession();
 				if (current && current.refreshToken !== credentials.refreshToken) {
 					return current;
